@@ -113,8 +113,10 @@ class BaseMapper:
                 "postalCode": found_record.get("postalCode"),
             }
 
-            # Map country to its code if neccesary
-            if found_record.get("country") and len(found_record.get("country")) != 2:
+            # Map country to its code if neccesary (2-char aliases like "UK" aren't ISO codes)
+            if found_record.get("country") and (
+                len(found_record.get("country")) != 2 or found_record.get("country") in countries
+            ):
                 if countries.get(found_record.get("country")):
                     address_info["country"] = countries.get(found_record.get("country"))
                 else:

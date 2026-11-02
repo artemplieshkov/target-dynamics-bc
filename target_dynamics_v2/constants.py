@@ -228,6 +228,7 @@ countries = {
     "Ukraine": "UA",
     "United Arab Emirates": "AE",
     "United Kingdom": "GB",
+    "UK": "GB",
     "United States": "US",
     "USA": "US",
     "United States Minor Outlying Islands": "UM",
