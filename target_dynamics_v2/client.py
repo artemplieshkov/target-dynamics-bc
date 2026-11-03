@@ -262,8 +262,9 @@ class DynamicsClient:
             _, _, payment_methods = self.get_entities("PaymentMethods", url_params)
             company["paymentMethods"] = payment_methods
 
-            _, _, dimensions = self.get_entities("Dimensions", url_params, expand="dimensionValues")
+            dimensions_ok, dimensions_error, dimensions = self.get_entities("Dimensions", url_params, expand="dimensionValues")
             company["dimensions"] = dimensions
+            self._debug_dimension_values(company, dimensions_ok, dimensions_error, dimensions)
 
             _, _, accounts = self.get_entities("Accounts", url_params)
             company["accounts"] = accounts
@@ -272,7 +273,56 @@ class DynamicsClient:
             company["locations"] = locations
 
         return True, None, companies
-    
+
+    # TODO(debug): temporary diagnostics for "could not find a Dimension Value" - remove after investigation
+    def _get_all_flat_dimension_values(self, company_id: str) -> List[dict]:
+        values = []
+        url = f"{self.url}companies({company_id})/dimensionValues"
+        session = self.get_auth()
+        while url:
+            response = session.get(url)
+            if response.status_code >= 400:
+                LOGGER.error(f"[debug-dimensions] flat dimensionValues failed for companyId={company_id}: {self._summarize_response(response)}")
+                break
+            data = response.json()
+            values += data.get("value", [])
+            url = data.get("@odata.nextLink")
+        return values
+
+    def _debug_dimension_values(self, company: dict, dimensions_ok: bool, dimensions_error, dimensions: List[dict]):
+        zero_guid = "00000000-0000-0000-0000-000000000000"
+        company_label = f"companyId={company['id']} name={company.get('name')!r}"
+        LOGGER.info(
+            f"[debug-dimensions] {company_label} Dimensions?$expand=dimensionValues ok={dimensions_ok} "
+            f"error={dimensions_error} dimensions={len(dimensions)} "
+            f"nextLinks={[d['code'] for d in dimensions if 'dimensionValues@odata.nextLink' in d]}"
+        )
+
+        flat_values = self._get_all_flat_dimension_values(company["id"])
+        dimension_ids = {d["id"]: d["code"] for d in dimensions}
+        zero_values = [v for v in flat_values if v.get("dimensionId") == zero_guid]
+        orphan_values = [v for v in flat_values if v.get("dimensionId") not in dimension_ids and v.get("dimensionId") != zero_guid]
+        LOGGER.info(
+            f"[debug-dimensions] {company_label} flat dimensionValues={len(flat_values)} "
+            f"zeroDimensionId={len(zero_values)} unknownDimensionId={len(orphan_values)}"
+        )
+
+        for dimension in dimensions:
+            expanded_ids = {v["id"] for v in dimension.get("dimensionValues", [])}
+            flat_for_dimension = [v for v in flat_values if v.get("dimensionId") == dimension["id"]]
+            missing = [v["code"] for v in flat_for_dimension if v["id"] not in expanded_ids]
+            LOGGER.info(
+                f"[debug-dimensions] {company_label} dimension={dimension['code']} id={dimension['id']} "
+                f"expanded={len(expanded_ids)} flat={len(flat_for_dimension)} flatNotInExpanded={missing[:50]}"
+            )
+
+        if zero_values:
+            sample = [
+                f"{v.get('code')}|{v.get('displayName')}|{v.get('lastModifiedDateTime')}"
+                for v in zero_values[:200]
+            ]
+            LOGGER.info(f"[debug-dimensions] {company_label} zeroDimensionId values (code|name|modified): {sample}")
+
     def get_existing_entities_for_records(self, companies_reference_data: List[Dict], record_type: str, records: List[Dict], filter_mappings: List[Dict], expand: Optional[str] = None) -> Dict[str, List]:
         """Maps records to companies and returns a list of entities based on 'records'"""
         

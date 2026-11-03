@@ -204,6 +204,12 @@ class BaseMapper:
             return found_dimension_value
 
         if not found_dimension_value:
+            # TODO(debug): temporary diagnostics - remove after investigation
+            LOGGER.info(
+                f"[debug-dimensions] lookup failed companyId={self.company['id']} dimension={dimension['code']} "
+                f"id={dimension['id']} lookingFor=id:{value_id}/code:{value_code}/name:{value_display_name} "
+                f"availableCodes={[v['code'] for v in dimension.get('dimensionValues', [])]}"
+            )
             raise InvalidDimensionValue(f"Dimension could not find a Dimension Value for dimension {dimension['code']} when looking up dimension value id={value_id} / code={value_code} / displayName={value_display_name}")
 
         return None
