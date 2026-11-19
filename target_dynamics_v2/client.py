@@ -18,6 +18,8 @@ class DynamicsRequestError(Exception):
 
 
 class DynamicsClient:
+    MAX_BATCH_PARTS = 100
+
     ref_request_endpoints = {
         "Companies": "companies",
         "Accounts": "companies({companyId})/accounts",
@@ -190,13 +192,22 @@ class DynamicsClient:
             request_data["requests"].append(data)
 
         base_url = self.custom_api_url if self._requires_custom_api(requests_data) else None
-        response = self._make_request("$batch", "POST", data=request_data, headers=headers, base_url=base_url)
-        if response.status_code >= 400:
-            summary = self._summarize_response(response)
-            raise DynamicsRequestError(f"Dynamics batch request failed: {summary}")
 
-        response_data = self._parse_json_response(response, "Dynamics batch request")
-        responses = response_data.get("responses", [])
+        all_requests = request_data["requests"]
+        if transaction_type == "atomic":
+            chunks = [all_requests]
+        else:
+            chunks = [all_requests[i:i + self.MAX_BATCH_PARTS] for i in range(0, len(all_requests), self.MAX_BATCH_PARTS)] or [[]]
+
+        responses = []
+        for chunk in chunks:
+            response = self._make_request("$batch", "POST", data={"requests": chunk}, headers=headers, base_url=base_url)
+            if response.status_code >= 400:
+                summary = self._summarize_response(response)
+                raise DynamicsRequestError(f"Dynamics batch request failed: {summary}")
+
+            response_data = self._parse_json_response(response, "Dynamics batch request")
+            responses += response_data.get("responses", [])
         return responses
 
     def get_entities(self, record_type: str, url_params: Optional[dict] = {}, filters: Optional[Dict[str, List]] = {}, expand: str = None):
