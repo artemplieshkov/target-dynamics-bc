@@ -5,12 +5,16 @@ import requests
 from target_dynamics_v2.mappers.base_mappers import BaseMapper
 from target_hotglue.common import HGJSONEncoder
 from typing import Dict, List, Optional
+from urllib.parse import quote
 import singer
 
 
 from target_dynamics_v2.auth import DynamicsAuth
 
 LOGGER = singer.get_logger()
+
+# Purchase Header "Your Reference" is Text[35] in BC.
+YOUR_REFERENCE_MAX_LENGTH = 35
 
 
 class DynamicsRequestError(Exception):
@@ -60,11 +64,13 @@ class DynamicsClient:
             self.url = full_url
             self.custom_api_url = f"https://api.businesscentral.dynamics.com/v2.0/{environment}/api/precoro/finance/v2.0/"
             self.purchaseref_api_url = f"https://api.businesscentral.dynamics.com/v2.0/{environment}/api/precoro/purchaseref/v2.0/"
+            self.odata_url = f"https://api.businesscentral.dynamics.com/v2.0/{environment}/ODataV4/"
         else:
             tenant_id, env_name = self._resolve_environment(environment)
             self.url = f"https://api.businesscentral.dynamics.com/v2.0/{tenant_id}/{env_name}/api/v2.0/"
             self.custom_api_url = f"https://api.businesscentral.dynamics.com/v2.0/{tenant_id}/{env_name}/api/precoro/finance/v2.0/"
             self.purchaseref_api_url = f"https://api.businesscentral.dynamics.com/v2.0/{tenant_id}/{env_name}/api/precoro/purchaseref/v2.0/"
+            self.odata_url = f"https://api.businesscentral.dynamics.com/v2.0/{tenant_id}/{env_name}/ODataV4/"
 
     def _resolve_environment(self, environment_name: str) -> tuple:
         """Return (aadTenantId, name) for the given environment.
@@ -444,6 +450,44 @@ class DynamicsClient:
     @property
     def custom_api_supports_credit_memos(self) -> bool:
         return "purchaseCreditMemo" in self.custom_api_entities
+
+    @staticmethod
+    def _odata_company_segment(company_name: str) -> str:
+        return "Company('{}')".format(quote(company_name.replace("'", "''"), safe=""))
+
+    def _odata_patch(self, endpoint: str, body: dict) -> Optional[str]:
+        """PATCH an ODataV4 web service. Returns an error message, or None on success.
+
+        ODataV4 PATCH requires If-Match (without it BC answers BadRequest_InvalidToken).
+        """
+        response = self._make_request(endpoint, "PATCH", data=body, headers={"If-Match": "*"}, base_url=self.odata_url)
+        if response.status_code >= 400:
+            return f"PATCH ODataV4/{endpoint} failed: {self._summarize_response(response)}"
+        return None
+
+    def update_purchase_document_your_reference(
+        self, company_name: str, service_name: str, purchase_invoice_id: str, your_reference: str
+    ) -> Optional[str]:
+        """Write "Your Reference" onto a purchase invoice header.
+
+        The standard API v2.0 purchaseInvoice has no such field; the ODataV4 purchaseDocuments
+        web service (`service_name`, renameable in BC Web Services) does, keyed by the same
+        SystemId GUID as API v2.0 purchaseInvoices.
+        """
+        endpoint = f"{self._odata_company_segment(company_name)}/{service_name}({purchase_invoice_id})"
+        return self._odata_patch(endpoint, {"yourReference": your_reference[:YOUR_REFERENCE_MAX_LENGTH]})
+
+    def update_purchase_invoice_doc_amount_incl_vat(
+        self, company_name: str, service_name: str, document_no: str, amount: float
+    ) -> Optional[str]:
+        """Write "Doc. Amount Incl. VAT" onto a purchase invoice header via Page 51
+        (Purchase Invoice) published as an ODataV4 web service under `service_name`."""
+        document_no_literal = quote(document_no.replace("'", "''"), safe="")
+        endpoint = (
+            f"{self._odata_company_segment(company_name)}/{service_name}"
+            f"(Document_Type='Invoice',No='{document_no_literal}')"
+        )
+        return self._odata_patch(endpoint, {"DocAmount": amount})
 
     def update_purchase_invoice_line_ref(
         self, company_id: str, line_id: str, star_client_ref: Optional[str], star_job_ref: Optional[str]

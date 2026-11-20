@@ -44,7 +44,34 @@ class BillSchemaMapper(BaseMapper):
         self._map_bill_line_items(payload)
         self._map_attachments(payload)
 
-        return {"payload": payload, "company_id": self.company["id"]}
+        return {
+            "payload": payload,
+            "company_id": self.company["id"],
+            "company_name": self.company.get("name"),
+            "header_odata_fields": self._map_header_odata_fields(),
+        }
+
+    def _map_header_odata_fields(self) -> dict:
+        """Header fields the API v2.0 purchaseInvoice doesn't expose - bill_sink.py PATCHes
+        them through ODataV4 web services after the invoice exists. Only sent when the
+        record carries them, so records without these fields behave exactly as before."""
+        fields = {}
+
+        your_reference = self.record.get("yourReference")
+        if isinstance(your_reference, str) and your_reference.strip():
+            fields["yourReference"] = your_reference.strip()
+
+        doc_amount = self.record.get("docAmountInclVat")
+        if doc_amount is not None and not isinstance(doc_amount, bool):
+            try:
+                doc_amount = float(doc_amount)
+            except (TypeError, ValueError):
+                doc_amount = None
+            # NaN != NaN - drops empty amounts that came through pandas as NaN
+            if doc_amount is not None and doc_amount == doc_amount:
+                fields["docAmountInclVat"] = doc_amount
+
+        return fields
 
     def _map_bill_line_items(self, payload):
         mapped_line_items = []

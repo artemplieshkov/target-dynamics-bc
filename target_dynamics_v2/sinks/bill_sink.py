@@ -76,6 +76,31 @@ class BillSink(DynamicsBaseBatchSinkSingleUpsert):
             state["externalId"] = externalId
         
         company_id = record["company_id"]
+        company_name = record.get("company_name")
+        header_odata_fields = record.get("header_odata_fields") or {}
+        page_service = self.config.get("purchase_invoice_page_service")
+        purchase_documents_service = self.config.get("purchase_documents_service")
+        if header_odata_fields and not company_name:
+            state["error"] = f"Cannot write {sorted(header_odata_fields)}: BC company name unknown for company {company_id}"
+            state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
+            return None, False, state
+        if "docAmountInclVat" in header_odata_fields and not page_service:
+            # Fail before creating anything rather than leave a BC invoice without the amount.
+            state["error"] = (
+                "docAmountInclVat is set but target config 'purchase_invoice_page_service' is missing - "
+                "publish Page 51 (Purchase Invoice) as an OData web service in BC and put its Service Name there"
+            )
+            state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
+            return None, False, state
+        if "yourReference" in header_odata_fields and not purchase_documents_service:
+            # Fail before creating anything rather than leave a BC invoice without Your Reference.
+            state["error"] = (
+                "yourReference is set but target config 'purchase_documents_service' is missing - "
+                "put the Service Name of the purchaseDocuments OData web service from BC Web Services there"
+            )
+            state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
+            return None, False, state
+
         bill_id = payload.pop("id", None)
         is_update = bill_id is not None
         bill_dimensions = payload.pop("dimensionSetLines", [])
@@ -98,6 +123,24 @@ class BillSink(DynamicsBaseBatchSinkSingleUpsert):
         # we have to re-fetch the bill otherwise we don't get the inherited dimensionSetLines from the Vendor
         _, _, bills = self.dynamics_client.get_entities(self.record_type, url_params={"companyId": company_id}, filters={"id": [bill_id]}, expand="dimensionSetLines")
         upserted_bill = bills[0]
+
+        # header fields the API v2.0 purchaseInvoice doesn't expose (ODataV4 web services)
+        odata_errors = []
+        if "yourReference" in header_odata_fields:
+            odata_errors.append(self.dynamics_client.update_purchase_document_your_reference(
+                company_name, purchase_documents_service, bill_id, header_odata_fields["yourReference"]
+            ))
+        if "docAmountInclVat" in header_odata_fields:
+            odata_errors.append(self.dynamics_client.update_purchase_invoice_doc_amount_incl_vat(
+                company_name, page_service, upserted_bill["number"], header_odata_fields["docAmountInclVat"]
+            ))
+        odata_errors = [error for error in odata_errors if error]
+        if odata_errors:
+            state["error"] = "\n".join(odata_errors)
+            state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
+            if not is_update:
+                self.delete_bill(bill_id, company_id)
+            return None, False, state
 
         # create/update bill dimensions
         if bill_dimensions:
