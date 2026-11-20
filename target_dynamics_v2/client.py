@@ -487,7 +487,7 @@ class DynamicsClient:
             f"{self._odata_company_segment(company_name)}/{service_name}"
             f"(Document_Type='Invoice',No='{document_no_literal}')"
         )
-        return self._odata_patch(endpoint, {"Doc_Amount_Incl_VAT": amount})
+        return self._odata_patch(endpoint, {"DocAmount": amount})
 
     def update_purchase_invoice_line_ref(
         self, company_id: str, line_id: str, star_client_ref: Optional[str], star_job_ref: Optional[str]
