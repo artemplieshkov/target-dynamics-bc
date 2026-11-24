@@ -477,17 +477,30 @@ class DynamicsClient:
         endpoint = f"{self._odata_company_segment(company_name)}/{service_name}({purchase_invoice_id})"
         return self._odata_patch(endpoint, {"yourReference": your_reference[:YOUR_REFERENCE_MAX_LENGTH]})
 
-    def update_purchase_invoice_doc_amount_incl_vat(
-        self, company_name: str, service_name: str, document_no: str, amount: float
+    def update_purchase_invoice_doc_amounts(
+        self,
+        company_name: str,
+        service_name: str,
+        document_no: str,
+        amount_incl_vat: Optional[float] = None,
+        amount_vat: Optional[float] = None,
     ) -> Optional[str]:
-        """Write "Doc. Amount Incl. VAT" onto a purchase invoice header via Page 51
-        (Purchase Invoice) published as an ODataV4 web service under `service_name`."""
+        """Write "Doc. Amount Incl. VAT" (DocAmount) and/or "Doc. Amount VAT" (DocAmountVAT) onto
+        a purchase invoice header via Page 51 (Purchase Invoice) published as an ODataV4 web
+        service under `service_name`. One PATCH for both fields."""
+        body = {}
+        if amount_incl_vat is not None:
+            body["DocAmount"] = amount_incl_vat
+        if amount_vat is not None:
+            body["DocAmountVAT"] = amount_vat
+        if not body:
+            return None
         document_no_literal = quote(document_no.replace("'", "''"), safe="")
         endpoint = (
             f"{self._odata_company_segment(company_name)}/{service_name}"
             f"(Document_Type='Invoice',No='{document_no_literal}')"
         )
-        return self._odata_patch(endpoint, {"DocAmount": amount})
+        return self._odata_patch(endpoint, body)
 
     def update_purchase_invoice_line_ref(
         self, company_id: str, line_id: str, star_client_ref: Optional[str], star_job_ref: Optional[str]

@@ -1,4 +1,5 @@
 import singer
+from typing import Optional
 
 from target_dynamics_v2.mappers.attachment_schema_mapper import AttachmentSchemaMapper
 from target_dynamics_v2.mappers.base_mappers import BaseMapper
@@ -61,17 +62,23 @@ class BillSchemaMapper(BaseMapper):
         if isinstance(your_reference, str) and your_reference.strip():
             fields["yourReference"] = your_reference.strip()
 
-        doc_amount = self.record.get("docAmountInclVat")
-        if doc_amount is not None and not isinstance(doc_amount, bool):
-            try:
-                doc_amount = float(doc_amount)
-            except (TypeError, ValueError):
-                doc_amount = None
-            # NaN != NaN - drops empty amounts that came through pandas as NaN
-            if doc_amount is not None and doc_amount == doc_amount:
-                fields["docAmountInclVat"] = doc_amount
+        for field in ("docAmountInclVat", "docAmountVat"):
+            amount = self._to_amount(self.record.get(field))
+            if amount is not None:
+                fields[field] = amount
 
         return fields
+
+    @staticmethod
+    def _to_amount(value) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        # NaN != NaN - drops empty amounts that came through pandas as NaN
+        return value if value == value else None
 
     def _map_bill_line_items(self, payload):
         mapped_line_items = []

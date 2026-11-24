@@ -84,10 +84,11 @@ class BillSink(DynamicsBaseBatchSinkSingleUpsert):
             state["error"] = f"Cannot write {sorted(header_odata_fields)}: BC company name unknown for company {company_id}"
             state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
             return None, False, state
-        if "docAmountInclVat" in header_odata_fields and not page_service:
+        doc_amount_fields = sorted({"docAmountInclVat", "docAmountVat"} & set(header_odata_fields))
+        if doc_amount_fields and not page_service:
             # Fail before creating anything rather than leave a BC invoice without the amount.
             state["error"] = (
-                "docAmountInclVat is set but target config 'purchase_invoice_page_service' is missing - "
+                f"{', '.join(doc_amount_fields)} set but target config 'purchase_invoice_page_service' is missing - "
                 "publish Page 51 (Purchase Invoice) as an OData web service in BC and put its Service Name there"
             )
             state["record"] = json.dumps(record, cls=HGJSONEncoder, sort_keys=True)
@@ -130,9 +131,13 @@ class BillSink(DynamicsBaseBatchSinkSingleUpsert):
             odata_errors.append(self.dynamics_client.update_purchase_document_your_reference(
                 company_name, purchase_documents_service, bill_id, header_odata_fields["yourReference"]
             ))
-        if "docAmountInclVat" in header_odata_fields:
-            odata_errors.append(self.dynamics_client.update_purchase_invoice_doc_amount_incl_vat(
-                company_name, page_service, upserted_bill["number"], header_odata_fields["docAmountInclVat"]
+        if doc_amount_fields:
+            odata_errors.append(self.dynamics_client.update_purchase_invoice_doc_amounts(
+                company_name,
+                page_service,
+                upserted_bill["number"],
+                amount_incl_vat=header_odata_fields.get("docAmountInclVat"),
+                amount_vat=header_odata_fields.get("docAmountVat"),
             ))
         odata_errors = [error for error in odata_errors if error]
         if odata_errors:
