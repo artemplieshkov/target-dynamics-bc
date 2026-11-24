@@ -1,4 +1,5 @@
 import singer
+from typing import Optional
 
 from target_dynamics_v2.mappers.attachment_schema_mapper import AttachmentSchemaMapper
 from target_dynamics_v2.mappers.base_mappers import BaseMapper
@@ -44,7 +45,40 @@ class BillSchemaMapper(BaseMapper):
         self._map_bill_line_items(payload)
         self._map_attachments(payload)
 
-        return {"payload": payload, "company_id": self.company["id"]}
+        return {
+            "payload": payload,
+            "company_id": self.company["id"],
+            "company_name": self.company.get("name"),
+            "header_odata_fields": self._map_header_odata_fields(),
+        }
+
+    def _map_header_odata_fields(self) -> dict:
+        """Header fields the API v2.0 purchaseInvoice doesn't expose - bill_sink.py PATCHes
+        them through ODataV4 web services after the invoice exists. Only sent when the
+        record carries them, so records without these fields behave exactly as before."""
+        fields = {}
+
+        your_reference = self.record.get("yourReference")
+        if isinstance(your_reference, str) and your_reference.strip():
+            fields["yourReference"] = your_reference.strip()
+
+        for field in ("docAmountInclVat", "docAmountVat"):
+            amount = self._to_amount(self.record.get(field))
+            if amount is not None:
+                fields[field] = amount
+
+        return fields
+
+    @staticmethod
+    def _to_amount(value) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        # NaN != NaN - drops empty amounts that came through pandas as NaN
+        return value if value == value else None
 
     def _map_bill_line_items(self, payload):
         mapped_line_items = []
