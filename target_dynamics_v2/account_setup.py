@@ -27,6 +27,7 @@ where payload is compact JSON for a body and empty for a GET.
 import hashlib
 import hmac
 import json
+import time
 
 import requests
 import singer
@@ -41,6 +42,9 @@ class AccountSetupClient:
         "Vendors": 8,
         "Items": 9,
     }
+
+    RETRY_WAITS = (10, 20, 40)
+    RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
     def __init__(self, account_setup: dict, logger=None):
         self.account_setup = account_setup or {}
@@ -71,6 +75,37 @@ class AccountSetupClient:
             "X-PRECORO-AUTH": signature,
             "X-COMPANY-ID": company_id,
         }
+
+    def _request_with_retry(self, method: str, url: str, payload: dict, context: str) -> requests.Response:
+        waits = self.RETRY_WAITS
+        for attempt in range(len(waits) + 1):
+            try:
+                response = requests.request(
+                    method, url, json=payload, headers=self._headers(payload), timeout=15
+                )
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == len(waits):
+                    raise
+                response, problem = None, f"{type(exc).__name__}: {exc}"
+            else:
+                if response.status_code not in self.RETRYABLE_STATUSES or attempt == len(waits):
+                    return response
+                problem = f"HTTP {response.status_code}"
+
+            wait = self._retry_wait(response, waits[attempt])
+            self.logger.warning(
+                f"{context} failed ({problem}); retry {attempt + 1}/{len(waits)} in {wait}s"
+            )
+            time.sleep(wait)
+
+    @staticmethod
+    def _retry_wait(response, default: int) -> int:
+        """Use Retry-After (seconds) when the server sends it, otherwise the default wait."""
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                return int(retry_after)
+        return default
 
     def _raise_for_status(self, response: requests.Response, context: str) -> None:
         try:
@@ -103,7 +138,7 @@ class AccountSetupClient:
 
         url = f"{self._base_url}/api/hotglue/account_setup/search"
         self.logger.info(f"POST {url} with payload: {payload}")
-        response = requests.post(url, json=payload, headers=self._headers(payload), timeout=15)
+        response = self._request_with_retry("POST", url, payload, "AccountSetup search")
         self._raise_for_status(response, "AccountSetup search")
         return response.json()
 
@@ -117,7 +152,7 @@ class AccountSetupClient:
 
         url = f"{self._base_url}/api/hotglue/account_setup/{external_id}"
         self.logger.info(f"PATCH {url} with payload: {payload}")
-        response = requests.patch(url, json=payload, headers=self._headers(payload), timeout=15)
+        response = self._request_with_retry("PATCH", url, payload, "AccountSetup patch")
         self._raise_for_status(response, "AccountSetup patch")
         return response.json()
 

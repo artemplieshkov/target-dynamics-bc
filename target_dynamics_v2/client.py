@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import requests
 
 from target_dynamics_v2.mappers.base_mappers import BaseMapper
@@ -23,6 +24,10 @@ class DynamicsRequestError(Exception):
 
 class DynamicsClient:
     MAX_BATCH_PARTS = 100
+
+    RETRY_WAITS = (10, 20, 40)
+    RETRYABLE_STATUSES = {429, 502, 503}
+    RETRYABLE_ERROR_MARKERS = ("deadlocked",)
 
     ref_request_endpoints = {
         "Companies": "companies",
@@ -115,13 +120,63 @@ class DynamicsClient:
         if should_dump_json:
             data = json.dumps(data, cls=HGJSONEncoder) if data else None
 
-        return request.request(
-            method=method,
-            url=url,
-            params=request_params,
-            data=data,
-            verify=True
-        )
+        waits = self.RETRY_WAITS
+        for attempt in range(len(waits) + 1):
+            response = request.request(
+                method=method,
+                url=url,
+                params=request_params,
+                data=data,
+                verify=True
+            )
+            if response.status_code not in self.RETRYABLE_STATUSES or attempt == len(waits):
+                return response
+
+            retry_after = response.headers.get("Retry-After", "")
+            wait = int(retry_after) if retry_after.isdigit() else waits[attempt]
+            LOGGER.warning(
+                f"Dynamics {method} {endpoint} returned {response.status_code}; "
+                f"retry {attempt + 1}/{len(waits)} in {wait}s"
+            )
+            time.sleep(wait)
+
+    def _is_retryable_batch_part(self, part_response: dict) -> bool:
+        """A $batch part BC rejected for a transient reason (throttling or a deadlock)."""
+        if part_response.get("status") in self.RETRYABLE_STATUSES:
+            return True
+        message = json.dumps(part_response.get("body", "")).lower()
+        return part_response.get("status", 0) >= 400 and any(m in message for m in self.RETRYABLE_ERROR_MARKERS)
+
+    def _post_batch(self, parts: List[dict], headers: dict, base_url: Optional[str]) -> List[dict]:
+        response = self._make_request("$batch", "POST", data={"requests": parts}, headers=headers, base_url=base_url)
+        if response.status_code >= 400:
+            summary = self._summarize_response(response)
+            raise DynamicsRequestError(f"Dynamics batch request failed: {summary}")
+        return self._parse_json_response(response, "Dynamics batch request").get("responses", [])
+
+    def _send_batch_chunk(self, chunk: List[dict], headers: dict, base_url: Optional[str], atomic: bool) -> List[dict]:
+        """Send one $batch chunk and resend the parts BC rejected for a transient reason.
+
+        Non-atomic: only the failed parts are resent, their new responses replace the old ones in
+        place. Atomic: BC rolls the whole changeset back when a part fails, so the chunk is resent.
+        """
+        responses = self._post_batch(chunk, headers, base_url)
+        for attempt, wait in enumerate(self.RETRY_WAITS, start=1):
+            failed = [i for i, r in enumerate(responses) if self._is_retryable_batch_part(r)]
+            if not failed:
+                break
+            LOGGER.warning(
+                f"Dynamics batch: {len(failed)} part(s) failed with a transient error "
+                f"(status {responses[failed[0]].get('status')}); retry {attempt}/{len(self.RETRY_WAITS)} in {wait}s"
+            )
+            time.sleep(wait)
+            if atomic:
+                responses = self._post_batch(chunk, headers, base_url)
+            else:
+                retried = self._post_batch([chunk[i] for i in failed], headers, base_url)
+                for i, r in zip(failed, retried):
+                    responses[i] = r
+        return responses
 
     @staticmethod
     def _summarize_response(response: requests.Response, max_length: int = 500) -> str:
@@ -207,13 +262,7 @@ class DynamicsClient:
 
         responses = []
         for chunk in chunks:
-            response = self._make_request("$batch", "POST", data={"requests": chunk}, headers=headers, base_url=base_url)
-            if response.status_code >= 400:
-                summary = self._summarize_response(response)
-                raise DynamicsRequestError(f"Dynamics batch request failed: {summary}")
-
-            response_data = self._parse_json_response(response, "Dynamics batch request")
-            responses += response_data.get("responses", [])
+            responses += self._send_batch_chunk(chunk, headers, base_url, atomic=transaction_type == "atomic")
         return responses
 
     def get_entities(self, record_type: str, url_params: Optional[dict] = {}, filters: Optional[Dict[str, List]] = {}, expand: str = None):
