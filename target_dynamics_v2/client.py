@@ -255,10 +255,13 @@ class DynamicsClient:
         base_url = self.custom_api_url if self._requires_custom_api(requests_data) else None
 
         all_requests = request_data["requests"]
+        if not all_requests:
+            return []
+
         if transaction_type == "atomic":
             chunks = [all_requests]
         else:
-            chunks = [all_requests[i:i + self.MAX_BATCH_PARTS] for i in range(0, len(all_requests), self.MAX_BATCH_PARTS)] or [[]]
+            chunks = [all_requests[i:i + self.MAX_BATCH_PARTS] for i in range(0, len(all_requests), self.MAX_BATCH_PARTS)]
 
         responses = []
         for chunk in chunks:
